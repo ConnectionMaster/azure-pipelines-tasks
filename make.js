@@ -577,3 +577,91 @@ target.bump = function() {
         }
     });
 }
+
+// Generate spritly zip
+// This methods generate a zip file that contains the tip of all task major versions for the last sprint
+// Use:
+//   npm run gensprintly -
+// 
+// Result:
+//   A zip file named a.b.x.zip
+// 
+// The generated zip can be uploaded to an account using tfx cli and it will install all of the tasks contained in the zip.
+// The zip should be uploaded to the azure-pipelines-tasks repository
+target.getSprintlyZip = function() {
+    console.log('# Creating sprintly zip.');
+
+    // START INPUTS
+    // TODO: pass variables as parameters?
+    var sprint = 'm153';
+    var revision = '0';
+    var outputDirectory = 'E:\\';
+    var dependenciesXmlFilePath = 'C:\\Users\\stfrance\\Desktop\\tempdeps.xml';
+    var taskFeedUrl = ``;
+    // END INPUTS
+
+    var today = new Date();
+    var date = `${today.getFullYear()}-${today.getMonth()}-${today.getDate()}`; // TODO: Maybe this should be sprint end date not the date it was generated.
+    var filename = `${sprint}-${date}-${revision}.zip`;
+    var outputFilePath = `${outputDirectory}${filename}`;
+
+    console.log(`Target file name: ${filename}`);
+    console.log(`Target file path: ${outputFilePath}`);
+
+    // Load dependencies file, extract name and version of tasks
+    console.log('\n# Loading tasks from dependencies file.');
+    var dependencies = fs.readFileSync(dependenciesXmlFilePath, 'utf8');
+
+    var dependenciesArr = dependencies.split('\n');
+    console.log(`Found ${dependenciesArr.length} dependencies.`);
+
+    var taskDependencies = [];
+
+    dependenciesArr.forEach(function (currentDep) {
+        if (currentDep.indexOf('Mseng.MS.TF.DistributedTask.Tasks.') === -1) {
+            return;
+        }
+
+        var depDetails = currentDep.split("\"");
+
+        var name = depDetails[1];
+        var version = depDetails[3];
+        var majorVersion = version.split('.')[0]; // 1.0.45
+
+        taskDependencies.push({ 'name': name, 'majorVersion': majorVersion });
+    });
+
+    console.log(`Found ${taskDependencies.length} task dependencies.`);
+
+    // Download task nuget packages
+    console.log('\n# Downloading task nuget packages.');
+
+    var tempTaskDirectory = '';
+    console.log(`Creating temporary task download directory ${tempTaskDirectory}`);
+
+    taskDependencies.forEach(function (taskDependency) {
+
+        console.log(JSON.stringify(taskDependency));
+
+        // TODO: Download into temp directory in output path
+        // taskFeedUrl
+    });
+
+    // Organize task nuget packages
+    // each file should be taskname-major verzion.zip
+    // We happen to name some tasks with major versions now but that's not always the case
+    // Need this structure for future compatibility to folder name changes
+
+
+
+    // Create a sprintly zip file in target location that contains all tasks
+
+
+    // Cleanup
+    console.log('Cleaning up folders');
+    console.log(`Deleting temporary task download directory ${tempTaskDirectory}`);
+    // TODO: Delete directory
+
+
+    console.log('\n# Completed creating sprintly zip.');
+}

@@ -8,10 +8,11 @@
   },
   "scripts": {
     "build": "node make.js build",
+    "bump": "node make.js bump",
+    "gensprintly": "node make.js getSprintlyZip",
     "test": "node make.js test",
     "testLegacy": "node make.js testLegacy",
-    "package": "node make.js package",
-    "bump": "node make.js bump"
+    "package": "node make.js package"
   },
   "repository": {
     "type": "git",
