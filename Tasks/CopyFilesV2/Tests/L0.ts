@@ -181,7 +181,7 @@ describe('CopyFiles L0 Suite', function () {
         done();
     });
 
-    it('skips if exists', (done: MochaDone) => {
+    it('skips if exists', (done: Mocha.Done) => {
         this.timeout(1000);
 
         let testPath = path.join(__dirname, 'L0skipsIfExists.js');
@@ -337,6 +337,39 @@ describe('CopyFiles L0 Suite', function () {
         assert(
             runner.stdOutContained(`copying ${path.normalize('/srcDir/someOtherDir2/file2.file')} to ${path.normalize('/destDir/someOtherDir2/file2.file')}`),
             'should have copied file1');
+        done();
+    });
+
+    it('ignores errors during target folder creation if ignoreMakeDirErrors is true', (done: Mocha.Done) => {
+        this.timeout(1000);
+
+        let testPath = path.join(__dirname, 'L0IgnoresMakeDirError.js');
+        let runner: mocktest.MockTestRunner = new mocktest.MockTestRunner(testPath);
+        runner.run();
+
+        assert(
+            runner.succeeded,
+            'should have succeeded');
+        assert(
+            runner.stdOutContained(`copying ${path.normalize('/srcDir/someOtherDir/file1.file')} to ${path.normalize('/destDir/someOtherDir/file1.file')}`),
+            'should have copied file1');
+
+        assert(
+            runner.stdOutContained(`copying ${path.normalize('/srcDir/someOtherDir/file2.file')} to ${path.normalize('/destDir/someOtherDir/file2.file')}`),
+            'should have copied file2');
+        done();
+    });
+
+    it('fails if there are errors during target folder creation if ignoreMakeDirErrors is false', (done: Mocha.Done) => {
+        this.timeout(1000);
+
+        let testPath = path.join(__dirname, 'L0FailsIfThereIsMkdirError.js');
+        let runner: mocktest.MockTestRunner = new mocktest.MockTestRunner(testPath);
+        runner.run();
+
+        assert(
+            runner.failed,
+            'should have failed');
         done();
     });
 
