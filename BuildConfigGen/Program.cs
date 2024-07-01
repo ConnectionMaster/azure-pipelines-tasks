@@ -1,7 +1,10 @@
 ﻿using System.Diagnostics.CodeAnalysis;
+using System.Runtime.InteropServices.JavaScript;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
+using BuildConfigGen.Debugging;
 
 namespace BuildConfigGen
 {
@@ -51,6 +54,8 @@ namespace BuildConfigGen
             public static ConfigRecord[] Configs = { Default, Node16, Node16_225, Node20, Node20_228, Node20_229_1, Node20_229_2, Node20_229_3, Node20_229_4, Node20_229_5, Node20_229_6, Node20_229_7, Node20_229_8, Node20_229_9, Node20_229_10, Node20_229_11, Node20_229_12, Node20_229_13, Node20_229_14, WorkloadIdentityFederation };
         }
 
+        static List<string> notSyncronizedDependencies = [];
+
         // ensureUpdateModeVerifier wraps all writes.  if writeUpdate=false, it tracks writes that would have occured
         static EnsureUpdateModeVerifier? ensureUpdateModeVerifier;
 
@@ -60,7 +65,30 @@ namespace BuildConfigGen
         /// <param name="writeUpdates">Write updates if true, else validate that the output is up-to-date</param>
         /// <param name="allTasks"></param>
         /// <param name="getTaskVersionTable"></param>
-        static void Main(string? task = null, string? configs = null, int? currentSprint = null, bool writeUpdates = false, bool allTasks = false, bool getTaskVersionTable = false)
+        /// <param name="debugAgentDir">When set to the local pipeline agent directory, this tool will produce tasks in debug mode with the corresponding visual studio launch configurations that can be used to attach to built tasks running on this agent</param>
+        static void Main(string? task = null, string? configs = null, int? currentSprint = null, bool writeUpdates = false, bool allTasks = false, bool getTaskVersionTable = false, string? debugAgentDir = null)
+        {
+            try
+            {
+                MainInner(task, configs, currentSprint, writeUpdates, allTasks, getTaskVersionTable, debugAgentDir);
+            }
+            catch (Exception e2)
+            {
+                // format exceptions nicer than the default formatting.  This prevents a long callstack from DragonFruit and puts the exception on the bottom so it's easier to find.
+
+                var restore = Console.ForegroundColor;
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine(e2.ToString());
+                Console.ForegroundColor = restore;
+                Console.WriteLine();
+                Console.WriteLine("An exception occured generating configs. Exception message below: (full callstack above)");
+                Console.WriteLine(e2.Message);
+
+                Environment.Exit(1);
+            }
+        }
+
+        private static void MainInner(string? task, string? configs, int? currentSprint, bool writeUpdates, bool allTasks, bool getTaskVersionTable, string? debugAgentDir)
         {
             if (allTasks)
             {
@@ -73,11 +101,10 @@ namespace BuildConfigGen
                 NotNullOrThrow(configs, "Configs is required");
             }
 
+            string currentDir = Environment.CurrentDirectory;
+            string gitRootPath = GitUtil.GetGitRootPath(currentDir);
             if (getTaskVersionTable)
             {
-                string currentDir = Environment.CurrentDirectory;
-                string gitRootPath = GitUtil.GetGitRootPath(currentDir);
-
                 var tasks = MakeOptionsReader.ReadMakeOptions(gitRootPath);
 
                 Console.WriteLine("config\ttask\tversion");
@@ -95,15 +122,16 @@ namespace BuildConfigGen
                 return;
             }
 
+            IDebugConfigGenerator debugConfGen = string.IsNullOrEmpty(debugAgentDir)
+                ? new NoDebugConfigGenerator()
+                : new VsCodeLaunchConfigGenerator(gitRootPath, debugAgentDir);
+
             if (allTasks)
             {
-                string currentDir = Environment.CurrentDirectory;
-                string gitRootPath = GitUtil.GetGitRootPath(currentDir);
-
                 var tasks = MakeOptionsReader.ReadMakeOptions(gitRootPath);
                 foreach (var t in tasks.Values)
                 {
-                    Main3(t.Name, string.Join('|', t.Configs), writeUpdates, currentSprint);
+                    MainUpdateTask(t.Name, string.Join('|', t.Configs), writeUpdates, currentSprint, debugConfGen);
                 }
             }
             else
@@ -114,8 +142,16 @@ namespace BuildConfigGen
                 // 3. Ideally default windows exception will occur and errors reported to WER/watson.  I'm not sure this is happening, perhaps DragonFruit is handling the exception
                 foreach (var t in task!.Split(',', '|'))
                 {
-                    Main3(t, configs!, writeUpdates, currentSprint);
+                    MainUpdateTask(t, configs!, writeUpdates, currentSprint, debugConfGen);
                 }
+            }
+
+            debugConfGen.WriteLaunchConfigurations();
+
+            if (notSyncronizedDependencies.Count > 0)
+            {
+                notSyncronizedDependencies.Insert(0, $"##vso[task.logissue type=error]There are problems with the dependencies in the buildConfig's package.json files. Please fix the following issues:");
+                throw new Exception(string.Join("\r\n", notSyncronizedDependencies));
             }
         }
 
@@ -127,7 +163,7 @@ namespace BuildConfigGen
             }
         }
 
-        private static void NotNullOrThrow<T>(T value, string message)
+        private static void NotNullOrThrow<T>([NotNull] T value, string message)
         {
             if (value == null)
             {
@@ -194,7 +230,12 @@ namespace BuildConfigGen
             }
         }
 
-        private static void Main3(string task, string configsString, bool writeUpdates, int? currentSprint)
+        private static void MainUpdateTask(
+            string task,
+            string configsString,
+            bool writeUpdates,
+            int? currentSprint,
+            IDebugConfigGenerator debugConfigGen)
         {
             if (string.IsNullOrEmpty(task))
             {
@@ -234,7 +275,7 @@ namespace BuildConfigGen
             {
                 ensureUpdateModeVerifier = new EnsureUpdateModeVerifier(!writeUpdates);
 
-                Main2(task, currentSprint, targetConfigs);
+                MainUpdateTaskInner(task, currentSprint, targetConfigs, debugConfigGen);
 
                 ThrowWithUserFriendlyErrorToRerunWithWriteUpdatesIfVeriferError(task, skipContentCheck: false);
             }
@@ -278,7 +319,11 @@ namespace BuildConfigGen
             }
         }
 
-        private static void Main2(string task, int? currentSprint, HashSet<Config.ConfigRecord> targetConfigs)
+        private static void MainUpdateTaskInner(
+            string task,
+            int? currentSprint,
+            HashSet<Config.ConfigRecord> targetConfigs,
+            IDebugConfigGenerator debugConfigGen)
         {
             if (!currentSprint.HasValue)
             {
@@ -317,8 +362,19 @@ namespace BuildConfigGen
 
             string versionMapFile = Path.Combine(gitRootPath, "_generated", @$"{task}.versionmap.txt");
 
-
             UpdateVersions(gitRootPath, task, taskTargetPath, out var configTaskVersionMapping, targetConfigs: targetConfigs, currentSprint.Value, versionMapFile, out HashSet<Config.ConfigRecord> versionsUpdated);
+
+            var duplicateVersions = configTaskVersionMapping.GroupBy(x => x.Value).Select(x => new { version = x.Key, configName = String.Join(",", x.Select(x => x.Key.name)), count = x.Count() }).Where(x => x.count > 1);
+            if (duplicateVersions.Any())
+            {
+                StringBuilder dupConfigsStr = new StringBuilder();
+                foreach (var x in duplicateVersions)
+                {
+                    dupConfigsStr.AppendLine($"task={task} version={x.version} specified in multiple configName={x.configName} config count={x.count}");
+                }
+
+                throw new Exception(dupConfigsStr.ToString());
+            }
 
             foreach (var config in targetConfigs)
             {
@@ -345,7 +401,8 @@ namespace BuildConfigGen
                     EnsureBuildConfigFileOverrides(config, taskTargetPath);
                 }
 
-                var taskConfigExists = File.Exists(Path.Combine(taskOutput, "task.json"));
+                var taskConfigPath = Path.Combine(taskOutput, "task.json");
+                var taskConfigExists = File.Exists(taskConfigPath);
 
                 // only update task output if a new version was added, the config exists, or the task contains preprocessor instructions
                 // Note: CheckTaskInputContainsPreprocessorInstructions is expensive, so only call if needed
@@ -373,12 +430,67 @@ namespace BuildConfigGen
 
                 if (config.isNode)
                 {
+                    GetBuildConfigFileOverridePaths(config, taskTargetPath, out string configTaskPath, out string readmePath);
+
+                    EnsureDependencyVersionsAreSyncronized(
+                        task,
+                        Path.Combine(taskTargetPath, "package.json"),
+                        Path.Combine(taskTargetPath, buildConfigs, configTaskPath, "package.json"));
                     WriteNodePackageJson(taskOutput, config.nodePackageVersion, config.shouldUpdateTypescript);
                 }
+
+                debugConfigGen.WriteTypescriptConfig(taskOutput);
+                debugConfigGen.AddForTask(taskConfigPath);
             }
 
             // delay updating version map file until after buildconfigs generated
             WriteVersionMapFile(versionMapFile, configTaskVersionMapping, targetConfigs: targetConfigs);
+        }
+
+        private static bool VersionIsGreaterThan(string version1, string version2)
+        {
+            const string versionRE = @"(\d+)\.(\d+)\.(\d+)";
+            var originMatch = Regex.Match(version1, versionRE);
+            var generatedMatch = Regex.Match(version2, versionRE);
+            var originDependencyVersion = Version.Parse($"{originMatch.Groups[1].Value}.{originMatch.Groups[2].Value}.{originMatch.Groups[3].Value}");
+            var generatedDependencyVersion = Version.Parse($"{generatedMatch.Groups[1].Value}.{generatedMatch.Groups[2].Value}.{generatedMatch.Groups[3].Value}");
+            return originDependencyVersion.CompareTo(generatedDependencyVersion) > 0;
+        }
+
+        private static void EnsureDependencyVersionsAreSyncronized(
+            string task,
+            string originPackagePath,
+            string generatedPackagePath
+        )
+        {
+            NotNullOrThrow(ensureUpdateModeVerifier, "BUG: ensureUpdateModeVerifier is null");
+
+            JsonNode? originTaskPackage = JsonNode.Parse(ensureUpdateModeVerifier.FileReadAllText(originPackagePath));
+            JsonNode? buildConfigTaskPackage = JsonNode.Parse(ensureUpdateModeVerifier.FileReadAllText(generatedPackagePath));
+            NotNullOrThrow(originTaskPackage, $"BUG: originTaskPackage is null for {task}");
+            NotNullOrThrow(buildConfigTaskPackage, $"BUG: buildConfigTaskPackage is null for {task}");
+
+            var originDependencies = originTaskPackage["dependencies"];
+            NotNullOrThrow(originDependencies, $"BUG: origin dependencies in {task} is null");
+
+            foreach (var originDependency in originDependencies.AsObject())
+            {
+                string? originVersion = originDependency.Value?.ToString();
+                NotNullOrThrow(originVersion, $"BUG: origin dependency {originDependency.Key} version in {task} is null");
+                var buildConfigTaskDependencies = buildConfigTaskPackage["dependencies"];
+                NotNullOrThrow(buildConfigTaskDependencies, $"BUG: buildConfigs dependencies in {task} is null");
+                string? buildConfigDependencyVersion = buildConfigTaskDependencies[originDependency.Key]?.ToString();
+                
+                if (buildConfigDependencyVersion is null) {
+                    notSyncronizedDependencies.Add($@"Dependency ""{originDependency.Key}"" in {task} is missing in buildConfig's package.json");
+                    continue;
+                }
+
+                if (VersionIsGreaterThan(originVersion, buildConfigDependencyVersion))
+                {
+                    notSyncronizedDependencies.Add($@"Dependency ""{originDependency.Key}"" in {generatedPackagePath} has {buildConfigDependencyVersion} version and should be updated to {originVersion} as in {originPackagePath}");
+                }
+            }
         }
 
         private static bool HasTaskInputContainsPreprocessorInstructions(string sourcePath, Config.ConfigRecord config)
